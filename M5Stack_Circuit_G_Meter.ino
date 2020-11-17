@@ -14,6 +14,7 @@ const float kGFilteringCoeff = 0.5;
 
 // Global
 bool g_enable_sound = false;
+bool g_initialized = false;
 
 // Display Double Buffer
 TFT_eSprite g_TFTBuf = TFT_eSprite(&M5.Lcd);
@@ -61,9 +62,11 @@ void setup()
 
   // Detecct Button
   M5.update();
+  // Track Mode
   if (M5.BtnA.isPressed())
   {
     g_enable_sound = true;
+    M5.Lcd.setBrightness(255);
   }
 
   // Speaker Noise Reduce
@@ -102,9 +105,10 @@ AccelVect_t correctAccelOffset(AccelVect_t inputAccel)
   static float theta = 0;
 
   M5.update();
-  if (M5.BtnB.isPressed())
+  if (M5.BtnB.isPressed() or !g_initialized)
   {
     theta = -atan2(inputAccel.z, inputAccel.y);
+    g_initialized = true;
   }
 
   internal.x = constrain(inputAccel.x, -kMaxGValue, kMaxGValue);
