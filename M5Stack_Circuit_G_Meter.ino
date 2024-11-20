@@ -9,8 +9,8 @@ const uint8_t kCircleCenterPosX = 135;
 const uint8_t kCircleCenterPosY = 120;
 const uint8_t kOneGRadius = 80;
 const float kMaxGValue = 1.4;
-const uint16_t kZeroToneFreq = 1500;
-const float kGFilteringCoeff = 0.5;
+const uint16_t kZeroToneFreq = 1000;
+const float kGFilteringCoeff = 0.55;
 
 // Global
 bool g_enable_sound = false;
@@ -46,6 +46,7 @@ void setup()
   g_TFTBuf.setTextColor(BG_COLOR, TFT_BLACK);
   g_TFTBuf.setTextSize(2);
   g_TFTBuf.setTextFont(4);
+  M5.Lcd.setBrightness(255);
 
   // Show Strartup Scr.
   g_TFTBuf.fillSprite(TFT_BLACK);
@@ -56,7 +57,7 @@ void setup()
   g_TFTBuf.setTextSize(1);
   g_TFTBuf.drawString("For Racing", 150, 120);
   g_TFTBuf.setTextColor(TFT_BLUE);
-  g_TFTBuf.drawString("Press Left to Track Mode", 0, 200);
+  g_TFTBuf.drawString("Press Left to Enable Sound", 0, 200);
   g_TFTBuf.pushSprite(0, 0);
   delay(2000);
 
@@ -66,7 +67,6 @@ void setup()
   if (M5.BtnA.isPressed())
   {
     g_enable_sound = true;
-    M5.Lcd.setBrightness(255);
   }
 
   // Speaker Noise Reduce
@@ -163,10 +163,12 @@ void loop()
   g_TFTBuf.fillSprite(TFT_BLACK);
 
   // Calc Flame Rate
+  /*
   uint64_t now_micros = micros();
   uint16_t now_fps = (uint16_t)(1000000.0/((float)now_micros - (float)prev_micros));
   prev_micros = now_micros;
   g_TFTBuf.drawString(String(now_fps), 290, 215);
+  */
   
   // Get Accel Data
   M5.IMU.getAccelData(&nowAccelVect.x, &nowAccelVect.y, &nowAccelVect.z);
@@ -176,15 +178,9 @@ void loop()
   // Play Tone
   if(g_enable_sound)
   {
-    sound_interval_count++;
-    if(sound_interval_count >= 2)
-    {
-      sound_interval_count = 0;
-      uint16_t tone_freq = kZeroToneFreq + kZeroToneFreq * calcAccelVectSum(nowAccelVect);
-      M5.Speaker.tone(tone_freq, 10);  // duration is dummy
-    }else{
-      M5.Speaker.mute();
-    }
+    uint16_t tone_freq = kZeroToneFreq + kZeroToneFreq * calcAccelVectSum(nowAccelVect);
+    M5.Speaker.mute();
+    M5.Speaker.tone(tone_freq, 50);  // duration is dummy
   }
 
   // Draw Background
@@ -212,7 +208,8 @@ void loop()
   }
 
   // Draw G Point
-  uint16_t circle_color = getColorFromAccel(calcAccelVectSum(nowAccelVect));
+  //uint16_t circle_color = getColorFromAccel(calcAccelVectSum(nowAccelVect));
+  uint16_t circle_color = TFT_GREEN;
   g_TFTBuf.fillCircle(nowPixPos.x, nowPixPos.y, 20, circle_color);
 
   // Draw G Value
@@ -225,15 +222,18 @@ void loop()
   int x_start = kCircleCenterPosX - kOneGRadius * kMaxGValue;
   int x_width = kOneGRadius * kMaxGValue * 2;
   int x_bar = kOneGRadius * (-nowAccelVect.x + kMaxGValue);
-  uint16_t barX_color = getColorFromAccel(nowAccelVect.x);
+  //uint16_t barX_color = getColorFromAccel(nowAccelVect.x);
+  uint16_t barX_color = TFT_GREEN;
   g_TFTBuf.fillRect(x_start, 220, x_bar, 20, barX_color);
   g_TFTBuf.fillRect(x_start + x_bar, 220, x_width - x_bar, 20, TFT_BLACK);
   g_TFTBuf.drawRect(x_start, 220, x_width, 20, BG_COLOR);
+
   // draw G bar(Y)
   int y_start = kCircleCenterPosY - kOneGRadius * kMaxGValue;
   int y_width = kOneGRadius * kMaxGValue * 2;
   int y_bar = kOneGRadius * (-nowAccelVect.z + kMaxGValue);
-  uint16_t barY_color = getColorFromAccel(nowAccelVect.z);
+  //uint16_t barY_color = getColorFromAccel(nowAccelVect.z);
+  uint16_t barY_color = TFT_GREEN;
   g_TFTBuf.fillRect(0, y_start, 20, y_bar, TFT_BLACK);
   g_TFTBuf.fillRect(0, y_start + y_bar, 20, y_width - y_bar, barY_color);
   g_TFTBuf.drawRect(0, y_start, 20, y_width, BG_COLOR);
