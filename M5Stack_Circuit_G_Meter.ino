@@ -1,242 +1,224 @@
-#define M5STACK_MPU6886
-#include <M5Stack.h>
-#include "EEPROM.h"
+// -----------------------------------------------------------------------------
+//  M5Unified-based G-Meter (Core Gray)
+//  - Zero‑angle calibration (BtnB) is stored in EEPROM and restored on boot
+//  - Works with the latest M5Unified + M5GFX libraries (May 2025)
+// -----------------------------------------------------------------------------
+#include <M5Unified.h>
+#include <EEPROM.h>
+#include <array>      // std::array
+#include <algorithm>  // std::rotate, std::max
 
-// Const
-#define G_HISTORY_NUM 50
-#define BG_COLOR TFT_WHITE
-const uint8_t kCircleCenterPosX = 135;
-const uint8_t kCircleCenterPosY = 120;
-const uint8_t kOneGRadius = 80;
-const float kMaxGValue = 1.4;
-const uint16_t kZeroToneFreq = 1000;
-const float kGFilteringCoeff = 0.55;
+// ─────────────────────────────────────────────────────────────────────────────
+//  Constants
+// ─────────────────────────────────────────────────────────────────────────────
+constexpr int G_HISTORY_NUM = 50;
+constexpr uint16_t BG_COLOR = TFT_WHITE;
+constexpr uint8_t kCircleCenterPosX = 150;
+constexpr uint8_t kCircleCenterPosY = 120;
+constexpr uint8_t kOneGRadius = 100;           // pixel radius representing 1 G
+constexpr float kMaxGValue = 1.2f;             // draw up to ±1.2 G
+constexpr float kGFilteringCoeff = 0.6f;       // exponential moving‑average coeff
+constexpr uint32_t EEPROM_MAGIC = 0xA5A5A5A5;  // identifies valid data
 
-// Global
-bool g_enable_sound = false;
-bool g_initialized = false;
-
-// Display Double Buffer
-TFT_eSprite g_TFTBuf = TFT_eSprite(&M5.Lcd);
-
-// Struct
-struct PixelPos_t
-{
+// ─────────────────────────────────────────────────────────────────────────────
+//  Types / Globals
+// ─────────────────────────────────────────────────────────────────────────────
+struct PixelPos {
   uint16_t x, y;
 };
-
-struct AccelVect_t
-{
+struct AccelVect {
   float x, y, z;
 };
+struct CalibData {
+  uint32_t magic;
+  float theta;
+};
 
-// *******************************************************
+bool g_initialized = false;   // true once we have a valid θ offset
+float g_theta = 0.0f;         // roll‑axis calibration angle [rad]
+M5Canvas g_buf(&M5.Display);  // off‑screen buffer for flicker‑free rendering
 
-void setup()
-{
-  // System Init
-  M5.begin();
-  M5.Power.begin();
-  M5.IMU.Init();
-  EEPROM.begin(1024);
-  delay(250);
-  M5.Lcd.fillScreen(TFT_BLACK);
-  g_TFTBuf.setColorDepth(8);
-  g_TFTBuf.createSprite(320, 240);
-  g_TFTBuf.setTextColor(BG_COLOR, TFT_BLACK);
-  g_TFTBuf.setTextSize(2);
-  g_TFTBuf.setTextFont(4);
-  M5.Lcd.setBrightness(255);
+// G‑history using std::array for rotate
+std::array<uint16_t, G_HISTORY_NUM> hist_x{};
+std::array<uint16_t, G_HISTORY_NUM> hist_y{};
 
-  // Show Strartup Scr.
-  g_TFTBuf.fillSprite(TFT_BLACK);
-  g_TFTBuf.drawRect(30, 50, 260, 110, TFT_CYAN);
-  g_TFTBuf.setTextColor(TFT_CYAN);
-  g_TFTBuf.setTextSize(2);
-  g_TFTBuf.drawString("G Meter", 50, 70);
-  g_TFTBuf.setTextSize(1);
-  g_TFTBuf.drawString("For Racing", 150, 120);
-  g_TFTBuf.setTextColor(TFT_BLUE);
-  g_TFTBuf.drawString("Press Left to Enable Sound", 0, 200);
-  g_TFTBuf.pushSprite(0, 0);
-  delay(2000);
-
-  // Detecct Button
-  M5.update();
-  // Track Mode
-  if (M5.BtnA.isPressed())
-  {
-    g_enable_sound = true;
+// ─────────────────────────────────────────────────────────────────────────────
+//  EEPROM helpers
+// ─────────────────────────────────────────────────────────────────────────────
+static void loadCalibration() {
+  CalibData c{};
+  EEPROM.get(0, c);
+  if (c.magic == EEPROM_MAGIC && std::isfinite(c.theta)) {
+    g_theta = c.theta;
+    g_initialized = true;
   }
-
-  // Speaker Noise Reduce
-  if(g_enable_sound)
-  {
-    M5.Speaker.begin();
-    M5.Speaker.tone(kZeroToneFreq, 50);delay(200);
-    M5.Speaker.mute();
-    M5.Speaker.tone(kZeroToneFreq, 50);delay(200);
-    M5.Speaker.mute();
-  }else{
-    M5.Speaker.mute();
-    pinMode(25, OUTPUT);
-    digitalWrite(25, LOW);
-  }
-
-  g_TFTBuf.fillSprite(TFT_BLACK);
-  g_TFTBuf.setTextColor(BG_COLOR);
-  g_TFTBuf.pushSprite(0, 0);
+}
+static void saveCalibration() {
+  CalibData c{ EEPROM_MAGIC, g_theta };
+  EEPROM.put(0, c);
+  EEPROM.commit();
   delay(500);
 }
 
-// Calc Sum of Accel
-float calcAccelVectSum(AccelVect_t inputAccel)
-{
-  float internal = sqrt(inputAccel.x * inputAccel.x + inputAccel.z * inputAccel.z);
-  internal -= 0.04;
-  if(internal <= 0)internal = 0;
-  return internal; 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Math helpers
+// ─────────────────────────────────────────────────────────────────────────────
+static float calcAccelSum(const AccelVect& a) {
+  return std::max(0.0f, hypotf(a.x, a.z) - 0.04f);
 }
 
-// Correct Accel Offset
-AccelVect_t correctAccelOffset(AccelVect_t inputAccel)
-{
-  AccelVect_t internal;
-  static float theta = 0;
+static AccelVect correctAccelOffset(const AccelVect& in) {
+  AccelVect v = in;
 
-  M5.update();
-  if (M5.BtnB.isPressed() or !g_initialized)
-  {
-    theta = -atan2(inputAccel.z, inputAccel.y);
+  // Capture new offset when BtnB pressed (or at first run)
+  if (!g_initialized || M5.BtnB.isPressed()) {
+    g_theta = -atan2f(v.z, v.y);
     g_initialized = true;
+    saveCalibration();
   }
 
-  internal.x = constrain(inputAccel.x, -kMaxGValue, kMaxGValue);
-  internal.y = constrain(inputAccel.y, -kMaxGValue, kMaxGValue);
-  internal.z = constrain(inputAccel.z, -kMaxGValue, kMaxGValue);
-  
-  internal.z = internal.z * cos(theta) + internal.y * sin(theta);
-  internal.y = internal.z * sin(theta) + internal.y * cos(theta);
-  return internal;
+  // Clamp raw values
+  v.x = constrain(v.x, -kMaxGValue, kMaxGValue);
+  v.y = constrain(v.y, -kMaxGValue, kMaxGValue);
+  v.z = constrain(v.z, -kMaxGValue, kMaxGValue);
+
+  // Rotate so +Z aligns with gravity when vehicle is level
+  const float cz = cosf(g_theta);
+  const float sz = sinf(g_theta);
+  float z_new = v.z * cz + v.y * sz;
+  float y_new = v.z * sz + v.y * cz;
+  v.z = z_new;
+  v.y = y_new;
+  return v;
 }
 
-// Averaging Accel
-AccelVect_t averageAccel(AccelVect_t inputAccel)
-{
-  static AccelVect_t internal = {0,0,0};
-
-  internal.x = internal.x * kGFilteringCoeff + inputAccel.x * (1.0-kGFilteringCoeff);
-  internal.y = internal.y * kGFilteringCoeff + inputAccel.y * (1.0-kGFilteringCoeff);
-  internal.z = internal.z * kGFilteringCoeff + inputAccel.z * (1.0-kGFilteringCoeff);
-  return internal;
+static AccelVect averageAccel(const AccelVect& in) {
+  static AccelVect v{ 0, 0, 0 };
+  v.x = v.x * kGFilteringCoeff + in.x * (1.0f - kGFilteringCoeff);
+  v.y = v.y * kGFilteringCoeff + in.y * (1.0f - kGFilteringCoeff);
+  v.z = v.z * kGFilteringCoeff + in.z * (1.0f - kGFilteringCoeff);
+  return v;
 }
 
-// Get Pixel Position from Accel
-PixelPos_t convertAccel2PixelPos(AccelVect_t inputAccel)
-{
-  struct PixelPos_t pix;
-  pix.x = -inputAccel.x * kOneGRadius + kCircleCenterPosX;
-  pix.y = -inputAccel.z * kOneGRadius + kCircleCenterPosY;
-  return pix;
+static PixelPos convertAccel2PixelPos(const AccelVect& a) {
+  return {
+    static_cast<uint16_t>(-a.x * kOneGRadius + kCircleCenterPosX),
+    static_cast<uint16_t>(-a.z * kOneGRadius + kCircleCenterPosY)
+  };
 }
 
-// Get Color from Accel
-uint16_t getColorFromAccel(float accVal)
-{
-  // Decide Color from now Accel(Green -> Red)
-  float accVal_limited = (abs(accVal) >= 1.0)?1.0:abs(accVal);
-  uint16_t red_level = 255.0 * accVal_limited;
-  uint16_t green_level = 255.0 * (1.0 - accVal_limited);
-  return M5.Lcd.color565(red_level,green_level,0);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+//  Arduino setup
+// ─────────────────────────────────────────────────────────────────────────────
+void setup() {
+  auto cfg = M5.config();
+  cfg.output_power = true;   // enable AXP192 / IP5306 control
+  cfg.internal_spk = false;  // we mute the speaker manually later
+  M5.begin(cfg);
+  M5.Speaker.end();
 
-void loop()
-{
-  static uint16_t hist_x[G_HISTORY_NUM] = {kCircleCenterPosX};
-  static uint16_t hist_y[G_HISTORY_NUM] = {kCircleCenterPosY};
-  static uint8_t nowHistBufPos = 0;
-  static struct PixelPos_t nowPixPos;
-  static struct AccelVect_t nowAccelVect;
-  static uint64_t prev_micros = 0;
-  static uint16_t sound_interval_count = 0;
-
-  g_TFTBuf.fillSprite(TFT_BLACK);
-
-  // Calc Flame Rate
-  /*
-  uint64_t now_micros = micros();
-  uint16_t now_fps = (uint16_t)(1000000.0/((float)now_micros - (float)prev_micros));
-  prev_micros = now_micros;
-  g_TFTBuf.drawString(String(now_fps), 290, 215);
-  */
-  
-  // Get Accel Data
-  M5.IMU.getAccelData(&nowAccelVect.x, &nowAccelVect.y, &nowAccelVect.z);
-  nowAccelVect = correctAccelOffset(nowAccelVect);
-  nowAccelVect = averageAccel(nowAccelVect);
-
-  // Play Tone
-  if(g_enable_sound)
-  {
-    uint16_t tone_freq = kZeroToneFreq + kZeroToneFreq * calcAccelVectSum(nowAccelVect);
-    M5.Speaker.mute();
-    M5.Speaker.tone(tone_freq, 50);  // duration is dummy
+  if (!M5.Imu.begin()) {
+    M5.Display.println("IMU not found!");
+    delay(1000);
   }
 
-  // Draw Background
-  g_TFTBuf.setTextSize(1);
-  g_TFTBuf.drawFastHLine(20, kCircleCenterPosY, 320, BG_COLOR);
-  g_TFTBuf.drawFastVLine(kCircleCenterPosX, 0, 240, BG_COLOR);
-  g_TFTBuf.drawString("1", kCircleCenterPosX + 80, kCircleCenterPosY + 2);
-  g_TFTBuf.drawString(String(kMaxGValue, 1), kCircleCenterPosX + 113, kCircleCenterPosY + 2);
-  g_TFTBuf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius, BG_COLOR);
-  g_TFTBuf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius * kMaxGValue, BG_COLOR);
+  EEPROM.begin(1024);
+  loadCalibration();
 
-  // draw G History
-  nowPixPos = convertAccel2PixelPos(nowAccelVect);
-  for(int i=G_HISTORY_NUM-1;i>0;i--)
-  {
-    hist_x[i] = hist_x[i-1];
-    hist_y[i] = hist_y[i-1];
+  // Prepare double buffer (8‑bit)
+  g_buf.setColorDepth(8);
+  g_buf.createSprite(320, 240);
+  g_buf.setTextColor(BG_COLOR, TFT_BLACK);
+  g_buf.setTextSize(2);
+  g_buf.setFont(&fonts::Font4);
+  M5.Display.setBrightness(255);
+
+  // ── Startup splash (2 s) ────────────────────────────────────────
+  g_buf.fillSprite(TFT_BLACK);
+  g_buf.drawRect(30, 50, 260, 110, TFT_CYAN);
+  g_buf.setTextColor(TFT_CYAN);
+  g_buf.drawString("G Meter", 50, 70);
+  g_buf.setTextSize(1);
+  g_buf.drawString("For Racing", 150, 120);
+  g_buf.setTextColor(TFT_BLUE);
+  g_buf.pushSprite(0, 0);
+  delay(2000);
+
+  // Clear screen
+  g_buf.fillSprite(TFT_BLACK);
+  g_buf.setTextColor(BG_COLOR);
+  g_buf.pushSprite(0, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Arduino loop
+// ─────────────────────────────────────────────────────────────────────────────
+void loop() {
+  M5.update();
+
+  // ── Acquire & process accelerometer data ────────────────────────
+  AccelVect acc;
+  M5.Imu.getAccelData(&acc.x, &acc.y, &acc.z);
+  acc = correctAccelOffset(acc);
+  acc = averageAccel(acc);
+
+  // ── Clear frame ─────────────────────────────────────────────────
+  g_buf.fillSprite(TFT_BLACK);
+
+  // ── Draw grid & guides ──────────────────────────────────────────
+  g_buf.drawFastHLine(20, kCircleCenterPosY, 320, BG_COLOR);
+  g_buf.drawFastVLine(kCircleCenterPosX, 0, 240, BG_COLOR);
+  g_buf.setTextSize(1);
+  g_buf.drawString("1", kCircleCenterPosX + 80, kCircleCenterPosY + 2);
+  g_buf.drawString(String(kMaxGValue, 1), kCircleCenterPosX + 125, kCircleCenterPosY + 2);
+  g_buf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius, BG_COLOR);
+  g_buf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius * kMaxGValue, BG_COLOR);
+
+  // ── History trail ───────────────────────────────────────────────
+  PixelPos nowPix = convertAccel2PixelPos(acc);
+  std::rotate(hist_x.rbegin(), hist_x.rbegin() + 1, hist_x.rend());
+  std::rotate(hist_y.rbegin(), hist_y.rbegin() + 1, hist_y.rend());
+  hist_x[0] = nowPix.x;
+  hist_y[0] = nowPix.y;
+
+  // Draw trajectory
+  for (size_t i = 1; i < hist_x.size(); ++i) {
+    g_buf.fillCircle(hist_x[i], hist_y[i], 4, TFT_ORANGE);
+    g_buf.drawLine(hist_x[i], hist_y[i], hist_x[i - 1], hist_y[i - 1], TFT_ORANGE);
   }
-  hist_x[0] = nowPixPos.x;
-  hist_y[0] = nowPixPos.y;
-  for(int i=1;i<G_HISTORY_NUM;i++)
-  {
-    g_TFTBuf.fillCircle(hist_x[i], hist_y[i], 4, TFT_ORANGE);
-    g_TFTBuf.drawLine(hist_x[i], hist_y[i], hist_x[i-1], hist_y[i-1], TFT_ORANGE);
-  }
 
-  // Draw G Point
-  //uint16_t circle_color = getColorFromAccel(calcAccelVectSum(nowAccelVect));
-  uint16_t circle_color = TFT_GREEN;
-  g_TFTBuf.fillCircle(nowPixPos.x, nowPixPos.y, 20, circle_color);
+  // ── Current G‑vector ────────────────────────────────────────────
+  g_buf.fillCircle(nowPix.x, nowPix.y, 15, TFT_GREEN);
+  g_buf.setTextSize(2);
+  g_buf.drawString(String(calcAccelSum(acc), 1), 250, 0);
+  g_buf.setTextSize(1);
+  g_buf.drawString("G", 300, 50);
 
-  // Draw G Value
-  g_TFTBuf.setTextSize(2);
-  g_TFTBuf.drawString(String(calcAccelVectSum(nowAccelVect), 1), 250, 0);
-  g_TFTBuf.setTextSize(1);
-  g_TFTBuf.drawString("G", 300, 50);
-  
-  // draw G bar(X)
-  int x_start = kCircleCenterPosX - kOneGRadius * kMaxGValue;
-  int x_width = kOneGRadius * kMaxGValue * 2;
-  int x_bar = kOneGRadius * (-nowAccelVect.x + kMaxGValue);
-  //uint16_t barX_color = getColorFromAccel(nowAccelVect.x);
-  uint16_t barX_color = TFT_GREEN;
-  g_TFTBuf.fillRect(x_start, 220, x_bar, 20, barX_color);
-  g_TFTBuf.fillRect(x_start + x_bar, 220, x_width - x_bar, 20, TFT_BLACK);
-  g_TFTBuf.drawRect(x_start, 220, x_width, 20, BG_COLOR);
+  // ── Symmetric X‑axis bar (horizontal, bottom) ──────────────────
+  const int16_t barHeight = 15;
+  const int16_t x_center = kCircleCenterPosX;
+  const int16_t x_half = kOneGRadius * kMaxGValue;  // max ± length
+  const int16_t baselineY = 225;
+  const int16_t x_len = static_cast<int16_t>(-kOneGRadius * acc.x);
 
-  // draw G bar(Y)
-  int y_start = kCircleCenterPosY - kOneGRadius * kMaxGValue;
-  int y_width = kOneGRadius * kMaxGValue * 2;
-  int y_bar = kOneGRadius * (-nowAccelVect.z + kMaxGValue);
-  //uint16_t barY_color = getColorFromAccel(nowAccelVect.z);
-  uint16_t barY_color = TFT_GREEN;
-  g_TFTBuf.fillRect(0, y_start, 20, y_bar, TFT_BLACK);
-  g_TFTBuf.fillRect(0, y_start + y_bar, 20, y_width - y_bar, barY_color);
-  g_TFTBuf.drawRect(0, y_start, 20, y_width, BG_COLOR);
+  g_buf.drawRect(x_center - x_half, baselineY, x_half * 2, barHeight, BG_COLOR);
+  if (x_len >= 0)
+    g_buf.fillRect(x_center, baselineY, x_len, barHeight, TFT_GREEN);
+  else
+    g_buf.fillRect(x_center + x_len, baselineY, -x_len, barHeight, TFT_GREEN);
 
-  g_TFTBuf.pushSprite(0, 0);
+  // ── Symmetric Y‑axis bar (vertical, left) ───────────────────────
+  const int16_t y_center = kCircleCenterPosY;
+  const int16_t y_half = kOneGRadius * kMaxGValue;
+  const int16_t barWidth = 15;
+  const int16_t y_len = static_cast<int16_t>(kOneGRadius * acc.z);
+
+  g_buf.drawRect(0, y_center - y_half, barWidth, y_half * 2, BG_COLOR);
+  if (y_len >= 0)
+    g_buf.fillRect(0, y_center - y_len, barWidth, y_len, TFT_GREEN);  // up
+  else
+    g_buf.fillRect(0, y_center, barWidth, -y_len, TFT_GREEN);  // down
+
+  // ── Present frame ───────────────────────────────────────────────
+  g_buf.pushSprite(0, 0);
 }
