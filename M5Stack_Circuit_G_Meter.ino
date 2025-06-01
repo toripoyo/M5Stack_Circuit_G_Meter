@@ -13,11 +13,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 constexpr int G_HISTORY_NUM = 50;
 constexpr uint16_t BG_COLOR = TFT_WHITE;
-constexpr uint8_t kCircleCenterPosX = 150;
+constexpr uint8_t kCircleCenterPosX = 160;
 constexpr uint8_t kCircleCenterPosY = 120;
 constexpr uint8_t kOneGRadius = 100;           // pixel radius representing 1 G
 constexpr float kMaxGValue = 1.2f;             // draw up to ±1.2 G
-constexpr float kGFilteringCoeff = 0.6f;       // exponential moving‑average coeff
+constexpr float kMaxGValueAcc = 0.4f;          // Accelearion Max 0.4G
+constexpr float kGFilteringCoeff = 0.65f;       // exponential moving‑average coeff
 constexpr uint32_t EEPROM_MAGIC = 0xA5A5A5A5;  // identifies valid data
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -77,11 +78,6 @@ static AccelVect correctAccelOffset(const AccelVect& in) {
     saveCalibration();
   }
 
-  // Clamp raw values
-  v.x = constrain(v.x, -kMaxGValue, kMaxGValue);
-  v.y = constrain(v.y, -kMaxGValue, kMaxGValue);
-  v.z = constrain(v.z, -kMaxGValue, kMaxGValue);
-
   // Rotate so +Z aligns with gravity when vehicle is level
   const float cz = cosf(g_theta);
   const float sz = sinf(g_theta);
@@ -89,6 +85,12 @@ static AccelVect correctAccelOffset(const AccelVect& in) {
   float y_new = v.z * sz + v.y * cz;
   v.z = z_new;
   v.y = y_new;
+
+  // Clamp values
+  v.x = constrain(v.x, -kMaxGValue, kMaxGValue);
+  v.y = constrain(v.y, -kMaxGValue, kMaxGValue);
+  v.z = constrain(v.z, -kMaxGValueAcc, kMaxGValue);
+
   return v;
 }
 
@@ -101,10 +103,15 @@ static AccelVect averageAccel(const AccelVect& in) {
 }
 
 static PixelPos convertAccel2PixelPos(const AccelVect& a) {
-  return {
-    static_cast<uint16_t>(-a.x * kOneGRadius + kCircleCenterPosX),
-    static_cast<uint16_t>(-a.z * kOneGRadius + kCircleCenterPosY)
-  };
+  PixelPos pos = {0,0};
+  pos.x = -a.x * kOneGRadius + kCircleCenterPosX;
+  if(-a.z < 0){
+    pos.y = -a.z * kOneGRadius + kCircleCenterPosY;
+  }else{
+    pos.y = -a.z/kMaxGValueAcc * kOneGRadius + kCircleCenterPosY; // 0.4G Max
+  }
+
+  return pos;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,10 +176,10 @@ void loop() {
   g_buf.drawFastHLine(20, kCircleCenterPosY, 320, BG_COLOR);
   g_buf.drawFastVLine(kCircleCenterPosX, 0, 240, BG_COLOR);
   g_buf.setTextSize(1);
-  g_buf.drawString("1", kCircleCenterPosX + 80, kCircleCenterPosY + 2);
-  g_buf.drawString(String(kMaxGValue, 1), kCircleCenterPosX + 125, kCircleCenterPosY + 2);
+  g_buf.drawString("1.0", 270, 218);
+  g_buf.drawString("1.0", 22, 20);
+  g_buf.drawString(String(kMaxGValueAcc, 1), 22, 197);
   g_buf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius, BG_COLOR);
-  g_buf.drawCircle(kCircleCenterPosX, kCircleCenterPosY, kOneGRadius * kMaxGValue, BG_COLOR);
 
   // ── History trail ───────────────────────────────────────────────
   PixelPos nowPix = convertAccel2PixelPos(acc);
@@ -195,11 +202,11 @@ void loop() {
   g_buf.drawString("G", 300, 50);
 
   // ── Symmetric X‑axis bar (horizontal, bottom) ──────────────────
-  const int16_t barHeight = 15;
+  const int16_t barHeight = 20;
   const int16_t x_center = kCircleCenterPosX;
-  const int16_t x_half = kOneGRadius * kMaxGValue;  // max ± length
-  const int16_t baselineY = 225;
-  const int16_t x_len = static_cast<int16_t>(-kOneGRadius * acc.x);
+  const int16_t x_half = kOneGRadius;  // max ± length
+  const int16_t baselineY = 220;
+  const int16_t x_len = nowPix.x - kCircleCenterPosX;
 
   g_buf.drawRect(x_center - x_half, baselineY, x_half * 2, barHeight, BG_COLOR);
   if (x_len >= 0)
@@ -209,15 +216,15 @@ void loop() {
 
   // ── Symmetric Y‑axis bar (vertical, left) ───────────────────────
   const int16_t y_center = kCircleCenterPosY;
-  const int16_t y_half = kOneGRadius * kMaxGValue;
-  const int16_t barWidth = 15;
-  const int16_t y_len = static_cast<int16_t>(kOneGRadius * acc.z);
+  const int16_t y_half = kOneGRadius;
+  const int16_t barWidth = 20;
+  const int16_t y_len = nowPix.y - kCircleCenterPosY;
 
   g_buf.drawRect(0, y_center - y_half, barWidth, y_half * 2, BG_COLOR);
   if (y_len >= 0)
-    g_buf.fillRect(0, y_center - y_len, barWidth, y_len, TFT_GREEN);  // up
+    g_buf.fillRect(0, y_center + y_len, barWidth, -y_len, TFT_GREEN); // Accel
   else
-    g_buf.fillRect(0, y_center, barWidth, -y_len, TFT_GREEN);  // down
+    g_buf.fillRect(0, y_center, barWidth, y_len, TFT_RED);            // Brake
 
   // ── Present frame ───────────────────────────────────────────────
   g_buf.pushSprite(0, 0);
