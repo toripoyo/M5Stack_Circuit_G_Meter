@@ -17,8 +17,8 @@ constexpr uint8_t kCircleCenterPosX = 160;
 constexpr uint8_t kCircleCenterPosY = 120;
 constexpr uint8_t kOneGRadius = 100;           // pixel radius representing 1 G
 constexpr float kMaxGValue = 1.2f;             // draw up to ±1.2 G
-constexpr float kMaxGValueAcc = 0.4f;          // Accelearion Max 0.4G
-constexpr float kGFilteringCoeff = 0.65f;       // exponential moving‑average coeff
+constexpr float kMaxGValueAcc = 0.6f;          // Accelearion Max 0.4G
+constexpr float kGFilteringCoeff = 0.8f;       // exponential moving‑average coeff
 constexpr uint32_t EEPROM_MAGIC = 0xA5A5A5A5;  // identifies valid data
 
 // ─────────────────────────────────────────────────────────────────────────────
