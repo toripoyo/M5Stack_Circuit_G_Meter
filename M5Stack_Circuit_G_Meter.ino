@@ -118,11 +118,12 @@ static PixelPos convertAccel2PixelPos(const AccelVect& a) {
 //  Arduino setup
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
-  auto cfg = M5.config();
+  auto cfg = M5.config();   // Default config is fine for Core & Core2
   cfg.output_power = true;   // enable AXP192 / IP5306 control
-  cfg.internal_spk = false;  // we mute the speaker manually later
+  cfg.internal_spk = true;
   M5.begin(cfg);
-  M5.Speaker.end();
+  M5.Speaker.begin();
+  M5.Speaker.stop();
 
   if (!M5.Imu.begin()) {
     M5.Display.println("IMU not found!");
